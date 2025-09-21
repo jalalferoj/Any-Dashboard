@@ -253,7 +253,8 @@
             color: var(--text-secondary);
         }
 
-        .chart-controls select {
+        .chart-controls select,
+        .aggregation-method-select {
             width: 100%;
             padding: 0.5rem;
             border: 1px solid var(--border-color);
@@ -261,6 +262,9 @@
             background-color: var(--bg-primary);
             color: var(--text-primary);
             font-family: var(--font-family);
+        }
+        .aggregation-control {
+            padding: 0 1.5rem 1.5rem;
         }
 
         .chart-container {
@@ -406,6 +410,15 @@
             <div class="chart-container">
                 <canvas></canvas>
             </div>
+            <div class="control-group aggregation-control">
+                <label>Aggregation Method</label>
+                <select class="aggregation-method-select">
+                    <option value="none">None (Direct Plot)</option>
+                    <option value="sum">Sum</option>
+                    <option value="avg">Average</option>
+                    <option value="count">Count</option>
+                </select>
+            </div>
         </div>
     </template>
     
@@ -436,7 +449,6 @@
             'percentageStackedBar': '100% Stacked Vertical Bar',
             'horizontalPercentageStackedBar': '100% Stacked Horizontal Bar',
             'barWithLine': 'Bar with Line (Mixed)',
-            'barWithDataLabels': 'Bar with Data Labels',
             'sortedBarAsc': 'Sorted Bar (Ascending)',
             'sortedBarDesc': 'Sorted Bar (Descending)',
             'barWithNegative': 'Bar with Negative Values',
@@ -524,7 +536,7 @@
             };
 
             if (['xlsx', 'xls'].includes(file.name.split('.').pop().toLowerCase())) {
-                reader.readAsArrayBuffer(data);
+                reader.readAsArrayBuffer(file);
             } else {
                 reader.readAsText(file);
             }
@@ -647,26 +659,33 @@
             const xCol = card.querySelector('.x-axis-select').value;
             const yCol = card.querySelector('.y-axis-select').value;
             const groupByCol = card.querySelector('.group-by-select').value;
+            const aggregationMethod = card.querySelector('.aggregation-method-select').value;
             const groupByControl = card.querySelector('.group-by-control');
-            
-            // Show 'Group By' only for relevant charts
+
             const needsGroupBy = ['groupedBar', 'horizontalGroupedBar', 'stackedBar', 'horizontalStackedBar', 'percentageStackedBar', 'horizontalPercentageStackedBar', 'tornado'].includes(chartType);
             groupByControl.style.display = needsGroupBy ? 'flex' : 'none';
 
             if (xCol === '(Select Column)' || yCol === '(Select Column)' || (needsGroupBy && groupByCol === '(Select Column)')) {
+                // Clear canvas if selections are invalid
+                const ctx = card.querySelector('canvas').getContext('2d');
+                if (chartInstances.has(cardId)) {
+                    chartInstances.get(cardId).destroy();
+                    chartInstances.delete(cardId);
+                }
                 return;
             }
 
             const ctx = card.querySelector('canvas').getContext('2d');
-            const config = getChartConfig(chartType, xCol, yCol, groupByCol);
-            
+            const config = getChartConfig(chartType, xCol, yCol, groupByCol, aggregationMethod);
+
             if (chartInstances.has(cardId)) {
                 chartInstances.get(cardId).destroy();
             }
-            
+
             const newChart = new Chart(ctx, config);
             chartInstances.set(cardId, newChart);
         }
+
         
         function updateChartOptions(chartInstance) {
             const isDarkMode = document.body.classList.contains('dark-mode');
@@ -679,38 +698,95 @@
             chartInstance.options.scales.y.ticks.color = textColor;
             chartInstance.options.plugins.legend.labels.color = textColor;
             chartInstance.options.plugins.title.color = textColor;
+            if(chartInstance.options.plugins.datalabels){
+                 chartInstance.options.plugins.datalabels.color = textColor;
+            }
         }
         
-        function getChartConfig(type, xCol, yCol, groupByCol) {
+        function getChartConfig(type, xCol, yCol, groupByCol, aggregationMethod = 'sum') {
             const isDarkMode = document.body.classList.contains('dark-mode');
             const gridColor = isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)';
             const textColor = isDarkMode ? '#edf2f7' : '#1a202c';
-            
-            // Data Aggregation
-            const aggregatedData = {};
-            globalData.forEach(row => {
-                const xValue = row[xCol];
-                const yValue = parseFloat(row[yCol]);
-                if (xValue === null || isNaN(yValue)) return;
-                
-                if (!aggregatedData[xValue]) aggregatedData[xValue] = 0;
-                aggregatedData[xValue] += yValue;
-            });
-            
-            let labels = Object.keys(aggregatedData);
-            let data = Object.values(aggregatedData);
 
-            // Base Config
-            let config = {
+            let labels = [];
+            let data = [];
+            
+            // --- DATA PREPARATION ---
+            if (aggregationMethod === 'none') {
+                labels = globalData.map(row => row[xCol]);
+                data = globalData.map(row => row[yCol]);
+            } else {
+                const aggregatedData = {};
+                const counts = {};
+
+                globalData.forEach(row => {
+                    const xValue = row[xCol];
+                    const yValue = aggregationMethod === 'count' ? 1 : parseFloat(row[yCol]);
+
+                    if (xValue === null || xValue === undefined || (aggregationMethod !== 'count' && isNaN(yValue))) return;
+
+                    if (!aggregatedData[xValue]) {
+                        aggregatedData[xValue] = 0;
+                        counts[xValue] = 0;
+                    }
+
+                    if (aggregationMethod === 'sum' || aggregationMethod === 'count') {
+                        aggregatedData[xValue] += yValue;
+                    } else if (aggregationMethod === 'avg') {
+                        aggregatedData[xValue] += yValue;
+                        counts[xValue] += 1;
+                    }
+                });
+
+                if (aggregationMethod === 'avg') {
+                    Object.keys(aggregatedData).forEach(key => {
+                        aggregatedData[key] = counts[key] > 0 ? aggregatedData[key] / counts[key] : 0;
+                    });
+                }
+
+                labels = Object.keys(aggregatedData);
+                data = Object.values(aggregatedData);
+            }
+            
+            // --- BASE CHART CONFIGURATION ---
+            const config = {
                 type: 'bar',
-                data: { labels, datasets: [{ label: yCol, data, backgroundColor: currentPalette, borderColor: currentPalette, borderWidth: 1 }] },
+                data: {
+                    labels,
+                    datasets: [{
+                        label: yCol,
+                        data,
+                        backgroundColor: currentPalette,
+                        borderColor: currentPalette,
+                        borderWidth: 1
+                    }]
+                },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
                     plugins: {
                         legend: { display: true, labels: { color: textColor } },
                         title: { display: true, text: `${CHART_TYPES[type]}: ${yCol} by ${xCol}`, color: textColor },
-                        datalabels: { display: false }
+                        datalabels: {
+                            display: true, // Display labels by default
+                            anchor: 'end',
+                            align: 'top',
+                            color: textColor,
+                            formatter: (value, context) => {
+                                const raw = context.dataset.data[context.dataIndex];
+                                if (raw === null || raw === undefined) return null;
+                                
+                                // For floating bar, data is an array e.g., [10, 50]
+                                if (Array.isArray(raw)) {
+                                    return `${raw[0]}-${raw[1]}`;
+                                }
+                                // For numbers, round to 2 decimal places
+                                if (typeof value === 'number') {
+                                    return Math.round(value * 100) / 100;
+                                }
+                                return value;
+                            }
+                        }
                     },
                     scales: {
                         x: { grid: { color: gridColor }, ticks: { color: textColor } },
@@ -758,11 +834,16 @@
                 case 'horizontalStackedBar':
                 case 'horizontalPercentageStackedBar':
                     config.options.indexAxis = 'y';
+                    config.options.plugins.datalabels.align = 'right';
+                    config.options.plugins.datalabels.anchor = 'end';
                     break;
                 case 'stackedBar':
                 case 'horizontalStackedBar':
                     config.options.scales.x.stacked = true;
                     config.options.scales.y.stacked = true;
+                    // For stacked charts, show label in the center
+                    config.options.plugins.datalabels.anchor = 'center';
+                    config.options.plugins.datalabels.align = 'center';
                     break;
                 case 'percentageStackedBar':
                 case 'horizontalPercentageStackedBar':
@@ -773,45 +854,47 @@
                     config.data.labels.forEach(label => { totals[label] = 0; });
                     config.data.datasets.forEach(dataset => {
                         dataset.data.forEach((val, i) => {
-                           totals[config.data.labels[i]] += val;
+                           totals[config.data.labels[i]] += (val || 0);
                         });
                     });
                     config.data.datasets.forEach(dataset => {
-                        dataset.data = dataset.data.map((val, i) => (val / totals[config.data.labels[i]] * 100) || 0);
+                        dataset.data = dataset.data.map((val, i) => (totals[config.data.labels[i]] !== 0 ? (val / totals[config.data.labels[i]] * 100) : 0));
                     });
+                     config.options.plugins.datalabels = {
+                        display: true,
+                        anchor: 'center',
+                        align: 'center',
+                        color: isDarkMode ? '#1a202c' : '#ffffff', // Contrasting color for labels inside bars
+                        formatter: (value) => value > 5 ? `${value.toFixed(0)}%` : '' // Show % and hide small values
+                    };
                     break;
                 case 'barWithLine':
+                    const avgData = config.data.datasets[0].data;
                     config.data.datasets.push({
                         type: 'line',
                         label: `Average ${yCol}`,
-                        data: data.map(() => data.reduce((a, b) => a + b, 0) / data.length),
+                        data: avgData.map(() => avgData.reduce((a, b) => a + b, 0) / avgData.length),
                         borderColor: '#ff6384',
                         backgroundColor: '#ff6384',
                         fill: false,
+                        datalabels: { display: false } // Don't show labels for the line
                     });
-                    break;
-                case 'barWithDataLabels':
-                    config.options.plugins.datalabels = { 
-                        display: true, 
-                        anchor: 'end', 
-                        align: 'top', 
-                        color: textColor, 
-                        formatter: (value) => Math.round(value * 100) / 100
-                    };
                     break;
                 case 'sortedBarAsc':
                 case 'sortedBarDesc':
-                    const zipped = labels.map((label, i) => ({label, value: data[i]}));
+                    const zipped = config.data.labels.map((label, i) => ({label, value: config.data.datasets[0].data[i]}));
                     zipped.sort((a, b) => type === 'sortedBarAsc' ? a.value - b.value : b.value - a.value);
                     config.data.labels = zipped.map(d => d.label);
                     config.data.datasets[0].data = zipped.map(d => d.value);
                     break;
-                case 'barWithNegative': // Data is already handled, this is for demonstration
+                case 'barWithNegative': // Data is already handled
+                    config.options.plugins.datalabels.align = (context) => context.dataset.data[context.dataIndex] >= 0 ? 'top' : 'bottom';
                     break;
                 case 'floatingBar':
-                    // Assumes Y-Axis data is formatted as 'min-max', e.g., '10-50'
                     config.data.datasets[0].data = globalData.map(row => (row[yCol] || "0-0").split('-').map(Number)).filter(d => d.length === 2);
                     config.data.labels = globalData.map(row => row[xCol]).slice(0, config.data.datasets[0].data.length);
+                    config.options.plugins.datalabels.anchor = 'center';
+                    config.options.plugins.datalabels.align = 'center';
                     break;
                 case 'roundedBar':
                     config.data.datasets.forEach(ds => { ds.borderRadius = 5; });
@@ -833,14 +916,15 @@
                         config.data.datasets[0].data = config.data.datasets[0].data.map(d => -d); // Make first dataset negative
                         config.options.plugins.tooltip = { callbacks: { label: c => `${c.dataset.label}: ${Math.abs(c.raw)}` }};
                         config.options.scales.x.ticks = { callback: v => Math.abs(v) };
+                        config.options.plugins.datalabels.formatter = (value) => Math.abs(Math.round(value * 100) / 100);
+                        config.options.plugins.datalabels.align = (context) => context.datasetIndex === 0 ? 'left' : 'right';
                     }
                     break;
                 case 'waterfall':
-                    // This is a simplified waterfall; true waterfall often needs custom logic
-                    config.type = 'bar';
-                    const waterfallData = [data[0]];
-                    for(let i = 1; i < data.length; i++) {
-                        waterfallData.push(data[i] - data[i-1]);
+                    const waterfallBaseData = config.data.datasets[0].data;
+                    const waterfallData = [waterfallBaseData[0]];
+                    for(let i = 1; i < waterfallBaseData.length; i++) {
+                        waterfallData.push(waterfallBaseData[i] - waterfallBaseData[i-1]);
                     }
                     config.data.datasets[0].data = waterfallData;
                     config.data.datasets[0].backgroundColor = waterfallData.map(v => v >= 0 ? 'rgba(75, 192, 192, 0.8)' : 'rgba(255, 99, 132, 0.8)');
@@ -849,6 +933,7 @@
             }
             return config;
         }
+
 
         // --- UTILITY FUNCTIONS ---
         function showLoader(show) {
